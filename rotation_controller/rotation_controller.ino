@@ -1,3 +1,5 @@
+#define BAUD 9600
+#include <util/setbaud.h>
 #include <avr/io.h>
 #include <util/delay.h>
 
@@ -9,10 +11,9 @@
 #define PIN_RANGE (PIN_MAX - PIN_MIN)  // Range between max and min
 
 // Servo variables
-boolean searching = true;
+boolean searching = true; // Controls whether the device will keep searching
 
 // ADC variables
-volatile int readFlag;  // High when a value is ready to be read
 volatile int analogVal;  // Value to store analog result
 
 
@@ -44,18 +45,19 @@ void init_servo() {
 
 /* Infrared sensor ADC initialization */
 void init_ir() {
+  // (1 << ADEN) Turns on ADC
+  // (1 << ADPS2) sets clock prescaler to 16
   ADCSRA = (1 << ADEN) | (1 << ADPS2);
+
+  // (1 << REFS0) makes it so AVCC with external capacitor at the AREF pin is used as VRef
+  // (1 << MUX1) sets ADC input to ADC2
   ADMUX = (1 << REFS0) | (1 << MUX1);
 
-  // Set ADIE in ADCSRA (0x7A) to enable the ADC interrupt.
-  // Without this, the internal interrupt will not trigger.
+  // Set ADIE in ADCSRA (0x7A) to enable the ADC interrupt
   ADCSRA |= (1 << ADIE);
 
   // Enable global interrupts
-  // AVR macro included in <avr/interrupts.h>, which the Arduino IDE
-  // supplies by default.
   sei();
-
 
   // Set ADSC in ADCSRA (0x7A) to start the ADC conversion
   ADCSRA |= (1 << ADSC);
@@ -67,62 +69,56 @@ ISR(ADC_vect) {
   // Must read low first
   analogVal = ADCL | (ADCH << 8);
 
+  // Calls method if object is detected
   if (analogVal >= 300) {
     check_for_face();
   }
-  
+
   // Set ADSC in ADCSRA (0x7A) to start the ADC conversion
   ADCSRA |= (1 << ADSC);
 }
 
 
-/* Initialize SPI Master Device */
-void init_spi (void) {
-  // Set MOSI, SCK as Output
-  DDRB |= (1 << 5) | (1 << 3);
+/* Configuring UART Communication in order to send data */
+void init_serial(void)
+{
+  UBRR0H = UBRRH_VALUE;
+  UBRR0L = UBRRL_VALUE;
 
-  // Enable SPI, Set as Master
-  //Prescaler: Fosc/16, Enable Interrupts
-  SPCR = (1 << SPE) | (1 << MSTR) | (1 << SPR0);
-}
+#if USE_2X
+  UCSR0A |= _BV(U2X0);
+#else
+  UCSR0A &= ~(_BV(U2X0));
+#endif
 
-
-/* Function to send and receive data for both master and slave */
-unsigned char spi_tranceiver (unsigned char data) {
-  // Load data into the buffer
-  SPDR = data;
-
-  // Wait until transmission complete
-  while(!(SPSR & (1 << SPIF)));
-
-  // Return received data
-  return(SPDR);
+  UCSR0C = _BV(UCSZ01) | _BV(UCSZ00); /* 8-bit data */
+  UCSR0B = _BV(RXEN0) | _BV(TXEN0);   /* Enable RX and TX */
 }
 
 
 /*
-Rotates towards given degree.
- */
+  Rotates towards given degree.
+*/
 void rotate_towards(int degree) {
-  float percentage = degree/180.0;
+  float percentage = degree / 180.0;
   OCR1A = (percentage * (PIN_MAX - PIN_MIN)) + PIN_MIN;
 }
 
 
 /*
-Rotates continuously, and blocks until searching is turned false.
- */
+  Rotates continuously.
+*/
 void search() {
   int incrementer = 1;
   int degree = 90;
 
   while (searching) {
-    // Sets increment based on whether the boundaries were passed.
+    // Sets increment based on whether the boundaries were passed
     if (degree <= 0) {
-      incrementer = 1; 
-    } 
+      incrementer = 1;
+    }
     else if (degree >= 180) {
-      incrementer = -1; 
+      incrementer = -1;
     }
 
     // Increments OCR1A
@@ -133,22 +129,31 @@ void search() {
   }
 }
 
-/* 
- Communicates with BeagleBone to know if a face is detected.
- Lights up an LED if such is the case.
- */
+/*
+  Communicates with BeagleBone to know if a face is detected.
+  Lights up an LED if such is the case.
+*/
 void check_for_face() {
-  DDRD |= (1 << PD7);
-  PORTD |= (1 << PD7);
-  _delay_ms(10);
-  PORTD &= ~(1 << PD7);
-  // Transmits request to BeagleBone and returns a response.
-  //char data = spi_tranceiver('1');
+  char data;
+  
+  // Transmits request to BeagleBone and receives a response
+  loop_until_bit_is_set(UCSR0A, UDRE0); /* Wait until data register empty. */
+  UDR0 = '1';
+  loop_until_bit_is_set(UCSR0A, RXC0); /* Wait until data exists. */
+  data = UDR0;
+  
+  // Lights up LED through PD7 if a face was detected by Beaglebone
+  if (data == '1') {
+    DDRD |= (1 << PD7);
+    PORTD |= (1 << PD7);
+    _delay_ms(1000);
+    PORTD &= ~(1 << PD7);
+  }
 }
 
 int main() {
   init_servo();
-  init_spi();
+  init_serial();
   init_ir();
 
   search();
